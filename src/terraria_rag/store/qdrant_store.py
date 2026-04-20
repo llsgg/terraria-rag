@@ -96,6 +96,29 @@ class QdrantStore:
         # Assumes chunk_index < 4096 per page (>>1 enough for our pages).
         return (int(pageid) << 12) | (int(chunk_index) & 0xFFF)
 
+    def existing_ids(self, batch: int = 4096) -> set[int]:
+        """Return every point id currently in the collection.
+
+        Used by the indexer for resume-on-restart: chunks whose id is already
+        present can skip the (expensive) embedding step.
+        """
+        if not self.client.collection_exists(self.collection):
+            return set()
+        ids: set[int] = set()
+        offset = None
+        while True:
+            points, offset = self.client.scroll(
+                collection_name=self.collection,
+                limit=batch,
+                offset=offset,
+                with_payload=False,
+                with_vectors=False,
+            )
+            ids.update(int(p.id) for p in points)
+            if offset is None:
+                break
+        return ids
+
     # ---- read ----
 
     def hybrid_search(

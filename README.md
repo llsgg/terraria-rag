@@ -157,7 +157,7 @@ uv run python scripts/04_index.py --rebuild  # 重建向量库
 
 预估（zh 站约 5000~8000 个页面）：
 
-- 爬取：约 1.5~2.5 小时（限速 1 req/s，礼貌爬取）
+- 爬取：约 5~15 分钟（默认 3 req/s × 4 并发 × 每请求 50 titles；详见 [`docs/crawler.md`](./docs/crawler.md)）
 - 切块 + 清洗：1~2 分钟
 - Embedding 时间随设备（在 `.env` 里设 `EMBEDDING_DEVICE`）：
     - macOS（M 系列，`mps`）：约 10~20 分钟（实测 ~9 chunks/s）
@@ -177,7 +177,9 @@ uv run python scripts/04_index.py --rebuild  # 重建向量库
 
 ## 礼貌爬取
 
-- 默认 1 req/s，遵守 robots.txt
-- User-Agent: `terraria-rag-bot/0.1 (personal study, https://github.com/yourname)`
+- 默认 3 req/s、4 并发、每请求 50 titles（见 [`docs/crawler.md`](./docs/crawler.md)）
+- User-Agent 留联系邮箱：`terraria-rag-bot/0.1 (personal study; contact: ...)`
 - 用 MediaWiki API（比硬爬 HTML 友好得多）
-- 失败自动重试 + 断点续传，避免重复打扰服务器
+- 失败自动重试（指数退避 × 5 次）+ 断点续传，避免重复打扰服务器
+
+> 想调整速率、改站点、或者理解为什么是这些默认值，请看 [`docs/crawler.md`](./docs/crawler.md)。
