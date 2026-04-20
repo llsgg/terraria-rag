@@ -1,8 +1,13 @@
 """Embed chunks with BGE-M3 and upsert into Qdrant.
 
+Resumable: on restart, the script scrolls existing point ids from the
+collection and skips chunks that are already indexed, so the costly BGE-M3
+embedding step is only run for new chunks.
+
 Usage:
-    uv run python scripts/04_index.py             # incremental (skips existing collection)
-    uv run python scripts/04_index.py --rebuild   # drop & recreate collection
+    uv run python scripts/04_index.py                  # incremental, resume-aware
+    uv run python scripts/04_index.py --rebuild        # drop & recreate, then index all
+    uv run python scripts/04_index.py --force-reindex  # re-embed even existing ids
 """
 
 from __future__ import annotations
@@ -55,6 +60,11 @@ def _batched(it, n):
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--rebuild", action="store_true", help="drop & recreate the collection")
+    ap.add_argument(
+        "--force-reindex",
+        action="store_true",
+        help="re-embed and upsert every chunk even if its id already exists",
+    )
     ap.add_argument("--batch-size", type=int, default=32, help="chunks per upsert batch")
     args = ap.parse_args()
 
@@ -64,25 +74,64 @@ def main() -> None:
         raise SystemExit(f"missing {chunks_path} — run 03_clean_chunk.py first")
 
     total = sum(1 for _ in open(chunks_path, "rb"))
-    print(f"[plan] {total} chunks to index")
-
-    print(f"[boot] loading BGE-M3 ({settings.embedding_model}, device={settings.embedding_device})")
-    embedder = BGEM3Embedder()
+    print(f"[plan] {total} chunks in {chunks_path}")
 
     print(f"[boot] opening qdrant at {settings.qdrant_path}")
     store = QdrantStore()
     store.ensure_collection(dense_dim=BGEM3Embedder.DENSE_DIM, recreate=args.rebuild)
 
+    # Resume support: figure out which point ids are already indexed.
+    # `--rebuild` just dropped the collection, so the set is trivially empty.
+    # `--force-reindex` ignores the set and re-embeds everything.
+    if args.rebuild or args.force_reindex:
+        existing: set[int] = set()
+        if args.force_reindex and not args.rebuild:
+            print("[resume] --force-reindex: re-embedding every chunk")
+    else:
+        print("[resume] scanning existing point ids in collection ...")
+        existing = store.existing_ids()
+        print(f"[resume] {len(existing)} chunks already indexed, will be skipped")
+
+    # Lazy-load the embedder: if there's nothing left to do we can avoid the
+    # multi-second BGE-M3 startup entirely.
+    embedder: BGEM3Embedder | None = None
+
+    def _get_embedder() -> BGEM3Embedder:
+        nonlocal embedder
+        if embedder is None:
+            print(
+                f"[boot] loading BGE-M3 ({settings.embedding_model}, "
+                f"device={settings.embedding_device})"
+            )
+            embedder = BGEM3Embedder()
+        return embedder
+
+    skipped = 0
+    indexed = 0
     bar = tqdm(total=total, desc="indexing", unit="chk")
     try:
-        for batch in _batched(_iter_chunks(chunks_path), args.batch_size):
-            embs = embedder.encode([c.text for c in batch])
-            store.upsert(batch, embs)
-            bar.update(len(batch))
+        for raw_batch in _batched(_iter_chunks(chunks_path), args.batch_size):
+            # Filter out chunks that are already in the collection.
+            todo: list[Chunk] = []
+            for ch in raw_batch:
+                pid = QdrantStore._point_id(ch.pageid, ch.chunk_index)
+                if pid in existing:
+                    skipped += 1
+                else:
+                    todo.append(ch)
+            if todo:
+                embs = _get_embedder().encode([c.text for c in todo])
+                store.upsert(todo, embs)
+                indexed += len(todo)
+            bar.update(len(raw_batch))
+            bar.set_postfix(indexed=indexed, skipped=skipped, refresh=False)
     finally:
         bar.close()
         store.close()
-    print(f"[done] indexed -> collection '{settings.qdrant_collection}'")
+    print(
+        f"[done] collection '{settings.qdrant_collection}': "
+        f"indexed={indexed} skipped={skipped} total={total}"
+    )
 
 
 if __name__ == "__main__":
