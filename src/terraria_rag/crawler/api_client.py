@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import threading
 import time
 from typing import Any, Iterator
 
@@ -17,19 +18,27 @@ from terraria_rag.config import settings
 
 
 class RateLimiter:
-    """Token-bucket-ish: enforce minimum gap between requests."""
+    """Thread-safe minimum-gap limiter (good enough for polite crawling)."""
 
     def __init__(self, rps: float) -> None:
         self.min_gap = 1.0 / rps if rps > 0 else 0.0
-        self._last = 0.0
+        self._next_allowed = 0.0
+        self._lock = threading.Lock()
 
     def wait(self) -> None:
         if self.min_gap <= 0:
             return
-        gap = time.monotonic() - self._last
-        if gap < self.min_gap:
-            time.sleep(self.min_gap - gap)
-        self._last = time.monotonic()
+        with self._lock:
+            now = time.monotonic()
+            sleep_for = self._next_allowed - now
+            if sleep_for > 0:
+                target = self._next_allowed
+            else:
+                sleep_for = 0.0
+                target = now
+            self._next_allowed = target + self.min_gap
+        if sleep_for > 0:
+            time.sleep(sleep_for)
 
 
 class WikiAPIClient:
@@ -102,6 +111,24 @@ class WikiAPIClient:
 
     # ---- fetch wikitext ----
 
+    @staticmethod
+    def _page_to_record(page: dict[str, Any]) -> dict[str, Any] | None:
+        if not page or page.get("missing"):
+            return None
+        revs = page.get("revisions") or []
+        if not revs:
+            return None
+        rev = revs[0]
+        wikitext = rev.get("slots", {}).get("main", {}).get("content", "")
+        return {
+            "pageid": page.get("pageid"),
+            "title": page.get("title"),
+            "revid": rev.get("revid"),
+            "timestamp": rev.get("timestamp"),
+            "categories": [c["title"] for c in page.get("categories", [])],
+            "wikitext": wikitext,
+        }
+
     def fetch_wikitext(self, title: str) -> dict[str, Any] | None:
         """Return {title, pageid, revid, wikitext, categories} or None if missing."""
         data = self._get(
@@ -118,19 +145,51 @@ class WikiAPIClient:
         pages = data.get("query", {}).get("pages", [])
         if not pages:
             return None
-        page = pages[0]
-        if page.get("missing"):
-            return None
-        revs = page.get("revisions") or []
-        if not revs:
-            return None
-        rev = revs[0]
-        wikitext = rev.get("slots", {}).get("main", {}).get("content", "")
-        return {
-            "pageid": page.get("pageid"),
-            "title": page.get("title"),
-            "revid": rev.get("revid"),
-            "timestamp": rev.get("timestamp"),
-            "categories": [c["title"] for c in page.get("categories", [])],
-            "wikitext": wikitext,
-        }
+        return self._page_to_record(pages[0])
+
+    def fetch_wikitext_batch(self, titles: list[str]) -> dict[str, dict[str, Any] | None]:
+        """Fetch up to 50 titles in one request. Returns {original_title: record_or_None}.
+
+        Resolves MediaWiki ``normalized`` and ``redirects`` rewrites so callers
+        can index the result by the title they originally asked for.
+        """
+        if not titles:
+            return {}
+        if len(titles) > 50:
+            raise ValueError("MediaWiki anonymous limit is 50 titles per request")
+
+        data = self._get(
+            {
+                "action": "query",
+                "prop": "revisions|categories|info",
+                "titles": "|".join(titles),
+                "rvprop": "ids|content|timestamp",
+                "rvslots": "main",
+                "cllimit": "max",
+                "redirects": 1,
+            }
+        )
+        query = data.get("query", {}) or {}
+
+        # original title -> (possibly normalized) -> (possibly redirected) -> final title
+        title_map: dict[str, str] = {t: t for t in titles}
+        for n in query.get("normalized", []) or []:
+            for orig, cur in title_map.items():
+                if cur == n.get("from"):
+                    title_map[orig] = n.get("to", cur)
+        for r in query.get("redirects", []) or []:
+            for orig, cur in title_map.items():
+                if cur == r.get("from"):
+                    title_map[orig] = r.get("to", cur)
+
+        by_title: dict[str, dict[str, Any]] = {}
+        for page in query.get("pages", []) or []:
+            t = page.get("title")
+            if t:
+                by_title[t] = page
+
+        out: dict[str, dict[str, Any] | None] = {}
+        for orig in titles:
+            page = by_title.get(title_map[orig])
+            out[orig] = self._page_to_record(page) if page else None
+        return out

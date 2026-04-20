@@ -25,8 +25,10 @@ class Settings(BaseSettings):
     wiki_lang: str = "zh"
     wiki_user_agent: str = "terraria-rag-bot/0.1 (personal study)"
 
-    crawl_rps: float = 1.0
+    crawl_rps: float = 3.0
     crawl_timeout_sec: int = 30
+    crawl_concurrency: int = 4
+    crawl_batch_size: int = 50
 
     data_dir: Path = Path("./data")
     qdrant_path: Path = Path("./data/qdrant")
