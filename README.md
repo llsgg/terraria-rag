@@ -40,8 +40,14 @@ terraria-rag/
 
 ## 快速开始
 
+> 流水线（5 步）：`01_enumerate` → `02_crawl` → `03_clean_chunk` → `04_index` → `05_serve`
+>
+> 默认 API 端口 **8001**（在 `.env` 里改 `API_PORT`）。
+
+### macOS / Linux
+
 ```bash
-# 0. 一次性：把 .env.example 复制成 .env（按需改）
+# 0. 复制 .env（按需改：HF 镜像、API 端口、embedding 设备等）
 cp .env.example .env
 
 # 1. 安装依赖（uv 会自动建 .venv 并装 Python 3.12）
@@ -61,16 +67,86 @@ uv run python scripts/04_index.py --rebuild
 
 # 4. 启动 API
 uv run python scripts/05_serve.py
-# Swagger UI: http://localhost:8000/docs
-# Health:    curl http://localhost:8000/health
-# Query:     curl -X POST http://localhost:8000/query \
-#              -H 'Content-Type: application/json' \
-#              -d '{"query":"如何获得飞行员风镜？", "top_k":5}'
 ```
+
+### Windows（PowerShell，推荐）
+
+```powershell
+# 0. 复制 .env（按需改）
+Copy-Item .env.example .env
+
+# 1. 安装依赖
+uv sync --index-strategy unsafe-best-match
+
+# 2. 下载 BGE-M3 模型（国内首选 ModelScope，~2.3GB）
+uv pip install modelscope
+uv run modelscope download --model BAAI/bge-m3 --local_dir .\models\bge-m3
+# 然后在 .env 把 EMBEDDING_MODEL 改成 ./models/bge-m3
+# （路径分隔符在 .env 里写 `/` 即可，跨平台兼容）
+
+# 3. smoke test：先爬 10 个页面验证流程
+uv run python scripts/01_enumerate.py --limit 10
+uv run python scripts/02_crawl.py
+uv run python scripts/03_clean_chunk.py
+uv run python scripts/04_index.py --rebuild
+
+# 4. 启动 API
+uv run python scripts/05_serve.py
+```
+
+### Windows（CMD）
+
+```bat
+copy .env.example .env
+uv sync --index-strategy unsafe-best-match
+uv pip install modelscope
+uv run modelscope download --model BAAI/bge-m3 --local_dir .\models\bge-m3
+
+uv run python scripts\01_enumerate.py --limit 10
+uv run python scripts\02_crawl.py
+uv run python scripts\03_clean_chunk.py
+uv run python scripts\04_index.py --rebuild
+uv run python scripts\05_serve.py
+```
+
+> Windows 上若 `uv` / `python` 没在 PATH，先安装 [uv](https://docs.astral.sh/uv/getting-started/installation/)（`winget install --id=astral-sh.uv`）。
+
+---
+
+## 调用 API
+
+启动后访问：
+
+- **Swagger UI**：<http://localhost:8001/docs>
+- **健康检查**：<http://localhost:8001/health>
+
+### 查询接口示例
+
+**bash / zsh / Git Bash（反斜杠续行）**
+
+```bash
+curl -X POST http://localhost:8001/query \
+  -H 'Content-Type: application/json' \
+  -d '{"query":"如何获得飞行员风镜？", "top_k":5}'
+```
+
+**Windows CMD（单行 — 不要用 `\` 续行，JSON 用双引号并转义内部 `\"`）**
+
+```bat
+curl -X POST http://localhost:8001/query -H "Content-Type: application/json" -d "{\"query\":\"如何获得飞行员风镜？\",\"top_k\":5}"
+```
+
+**PowerShell（推荐 `Invoke-RestMethod`，不用纠结引号）**
+
+```powershell
+Invoke-RestMethod -Uri http://localhost:8001/query -Method Post -ContentType "application/json" -Body '{"query":"如何获得飞行员风镜？","top_k":5}'
+```
+
+---
 
 ## 全量爬取
 
-确认 smoke test 通过后：
+确认 smoke test 通过后（命令在三个平台一致，把 `--limit` 去掉即可）：
 
 ```bash
 uv run python scripts/01_enumerate.py        # 不带 --limit
@@ -80,9 +156,13 @@ uv run python scripts/04_index.py --rebuild  # 重建向量库
 ```
 
 预估（zh 站约 5000~8000 个页面）：
+
 - 爬取：约 1.5~2.5 小时（限速 1 req/s，礼貌爬取）
 - 切块 + 清洗：1~2 分钟
-- Embedding（M4 Pro MPS GPU）：约 10~20 分钟（实测 ~9 chunks/s）
+- Embedding 时间随设备（在 `.env` 里设 `EMBEDDING_DEVICE`）：
+    - macOS（M 系列，`mps`）：约 10~20 分钟（实测 ~9 chunks/s）
+    - Windows / Linux + NVIDIA GPU（`cuda`）：约 5~15 分钟
+    - 纯 CPU（`cpu`）：1~3 小时，建议先用 `--limit` 试跑
 
 ## 已知 trade-off
 

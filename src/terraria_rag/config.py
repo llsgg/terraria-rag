@@ -41,7 +41,7 @@ class Settings(BaseSettings):
     chunk_overlap_tokens: int = 64
 
     api_host: str = "0.0.0.0"
-    api_port: int = 8000
+    api_port: int = 8001
     retrieval_top_k: int = 8
 
     @property
