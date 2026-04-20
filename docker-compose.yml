@@ -1,0 +1,13 @@
+# Optional: only needed if you outgrow the embedded mode.
+# By default the project uses QdrantClient(path=...) which writes to ./data/qdrant
+# and does not require this file. To switch:
+#   1) docker compose up -d qdrant
+#   2) edit src/terraria_rag/store/qdrant_store.py to use QdrantClient(host="...", port=6333)
+services:
+  qdrant:
+    image: qdrant/qdrant:v1.12.4
+    ports:
+      - "6333:6333"
+      - "6334:6334"
+    volumes:
+      - ./data/qdrant_server:/qdrant/storage
